@@ -9,6 +9,24 @@ dependencies = [
     "redis[hiredis]>=5.0.0",
     "pydantic>=2.0.0",
 ]
+license = {text = "MIT"}
+keywords = ["temporal", "cache", "redis", "workflow", "activity"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.urls]
+Homepage = "https://github.com/huscarldev/temporal-activity-cache"
+Documentation = "https://github.com/huscarldev/temporal-activity-cache#readme"
+Repository = "https://github.com/huscarldev/temporal-activity-cache"
+Issues = "https://github.com/huscarldev/temporal-activity-cache/issues"
 
 
 [build-system]
