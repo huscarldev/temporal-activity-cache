@@ -2,6 +2,9 @@
 
 Prefect-style activity caching for Temporal workflows using Redis.
 
+> **⚠️ Early Release Notice**
+> This is an early-stage release. While functional, the API may change and there may be bugs. Use with caution in production environments. This software is provided "as is" without warranty of any kind. See the LICENSE file for details.
+
 ## Overview
 
 `temporal-activity-cache` brings Prefect-style caching to Temporal activities. It enables distributed caching across workers by storing activity results in Redis, allowing results to be reused across different workflow executions and worker instances.
