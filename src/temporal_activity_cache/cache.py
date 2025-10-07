@@ -152,11 +152,73 @@ def cached_activity(
         @functools.wraps(func)
         def sync_wrapper(*args: Any, **kwargs: Any) -> T:
             # For sync functions, we need to run the async cache operations in event loop
-            # This is a simplified version - production code may need more sophisticated handling
-            raise NotImplementedError(
-                "Synchronous activities are not yet supported with caching. "
-                "Please use async activities with cached_activity decorator."
-            )
+            # Get cache backend
+            backend = cache_backend or get_cache_backend()
+
+            # Compute cache key
+            try:
+                cache_key = compute_cache_key(func, policy, args, kwargs)
+            except ValueError as e:
+                logger.warning(f"Failed to compute cache key: {e}. Executing without cache.")
+                return func(*args, **kwargs)
+
+            # Helper to run async operations in event loop
+            def run_async(coro):
+                try:
+                    # Try to get the running event loop
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        # We're in a thread pool - use run_coroutine_threadsafe
+                        future = asyncio.run_coroutine_threadsafe(coro, loop)
+                        return future.result()
+                    else:
+                        # No running loop - run synchronously
+                        return loop.run_until_complete(coro)
+                except RuntimeError:
+                    # No event loop exists - create a new one
+                    return asyncio.run(coro)
+
+            # Check cache
+            try:
+                cached_result = run_async(backend.get(cache_key))
+                if cached_result is not None:
+                    # Log cache hit
+                    try:
+                        info = activity.info()
+                        logger.info(
+                            f"Cache HIT for activity {info.activity_type} "
+                            f"in workflow {info.workflow_id}: {cache_key}"
+                        )
+                    except RuntimeError:
+                        # Not in activity context
+                        logger.info(f"Cache HIT: {cache_key}")
+
+                    return deserialize_result(cached_result)
+            except Exception as e:
+                logger.warning(f"Cache read failed: {e}. Executing without cache.")
+
+            # Cache miss - execute function
+            try:
+                info = activity.info()
+                logger.info(
+                    f"Cache MISS for activity {info.activity_type} "
+                    f"in workflow {info.workflow_id}: {cache_key}"
+                )
+            except RuntimeError:
+                # Not in activity context
+                logger.info(f"Cache MISS: {cache_key}")
+
+            # Execute activity
+            result = func(*args, **kwargs)
+
+            # Store in cache
+            try:
+                serialized = serialize_result(result)
+                run_async(backend.set(cache_key, serialized, ttl))
+            except Exception as e:
+                logger.warning(f"Failed to cache result for {cache_key}: {e}")
+
+            return result
 
         # Return appropriate wrapper based on whether function is async
         if asyncio.iscoroutinefunction(func):

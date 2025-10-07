@@ -166,6 +166,27 @@ async def send_email(to: str) -> None:
     await email_service.send(to)
 ```
 
+## Sync Activity Support
+
+Both synchronous and asynchronous activities are fully supported:
+
+```python
+# Async activity (recommended)
+@cached_activity(policy=CachePolicy.INPUTS, ttl=timedelta(hours=1))
+@activity.defn
+async def fetch_data_async(user_id: int) -> dict:
+    return await db.query(user_id)
+
+# Sync activity (for CPU-bound or blocking operations)
+@cached_activity(policy=CachePolicy.INPUTS, ttl=timedelta(hours=1))
+@activity.defn
+def fetch_data_sync(user_id: int) -> dict:
+    # Runs in thread pool executor
+    return blocking_database_call(user_id)
+```
+
+**Note:** When using sync activities with caching, the cache backend operations (get/set) are automatically bridged to work with the async cache backend from the sync context.
+
 ## Advanced Usage
 
 ### Custom Cache Backend
@@ -419,7 +440,6 @@ logger = logging.getLogger("temporal_activity_cache")
 
 ## Limitations
 
-- Only async activities are currently supported
 - Activity results must be JSON serializable
 - Cache invalidation is manual (no automatic invalidation on data changes)
 

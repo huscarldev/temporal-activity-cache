@@ -313,6 +313,145 @@ class TestInvalidateCache:
 
 
 @pytest.mark.unit
+class TestSyncActivityCaching:
+    """Test caching with synchronous activities."""
+
+    def test_sync_cache_miss_then_hit(self, cache_backend_configured):
+        """Test that sync activities work with caching."""
+        call_count = 0
+
+        @cached_activity(policy=CachePolicy.INPUTS, ttl=timedelta(hours=1))
+        def sync_test_activity(user_id: int) -> dict:
+            nonlocal call_count
+            call_count += 1
+            return {"user_id": user_id, "name": f"User {user_id}"}
+
+        # First call - cache miss
+        result1 = sync_test_activity(123)
+        assert result1 == {"user_id": 123, "name": "User 123"}
+        assert call_count == 1
+
+        # Second call - cache hit
+        result2 = sync_test_activity(123)
+        assert result2 == {"user_id": 123, "name": "User 123"}
+        assert call_count == 1  # Function not called again
+
+    def test_sync_different_inputs_different_cache(self, cache_backend_configured):
+        """Test that different inputs create different cache entries for sync activities."""
+        call_count = 0
+
+        @cached_activity(policy=CachePolicy.INPUTS)
+        def sync_test_activity(user_id: int) -> dict:
+            nonlocal call_count
+            call_count += 1
+            return {"user_id": user_id}
+
+        # Call with different inputs
+        result1 = sync_test_activity(123)
+        result2 = sync_test_activity(456)
+
+        assert result1 == {"user_id": 123}
+        assert result2 == {"user_id": 456}
+        assert call_count == 2  # Both calls executed
+
+    def test_sync_cache_with_multiple_args(self, cache_backend_configured):
+        """Test sync caching with multiple arguments."""
+        call_count = 0
+
+        @cached_activity(policy=CachePolicy.INPUTS)
+        def sync_test_activity(x: int, y: str, z: bool) -> str:
+            nonlocal call_count
+            call_count += 1
+            return f"{x}_{y}_{z}"
+
+        # First call
+        result1 = sync_test_activity(1, "test", True)
+        assert call_count == 1
+
+        # Same args - cache hit
+        result2 = sync_test_activity(1, "test", True)
+        assert result1 == result2
+        assert call_count == 1  # No additional call
+
+        # Different args - cache miss
+        result3 = sync_test_activity(2, "test", True)
+        assert call_count == 2
+
+    def test_sync_no_cache_policy(self, cache_backend_configured):
+        """Test that NO_CACHE policy disables caching for sync activities."""
+        call_count = 0
+
+        @cached_activity(policy=CachePolicy.NO_CACHE)
+        def sync_test_activity(x: int) -> int:
+            nonlocal call_count
+            call_count += 1
+            return x * 2
+
+        # First call
+        result1 = sync_test_activity(5)
+        assert result1 == 10
+        assert call_count == 1
+
+        # Second call - should execute again (no caching)
+        result2 = sync_test_activity(5)
+        assert result2 == 10
+        assert call_count == 2  # Called again!
+
+    def test_sync_task_source_policy(self, cache_backend_configured):
+        """Test TASK_SOURCE cache policy with sync activities."""
+
+        @cached_activity(policy=CachePolicy.TASK_SOURCE)
+        def sync_test_activity(x: int) -> int:
+            return x * 2
+
+        # First call
+        result1 = sync_test_activity(5)
+        assert result1 == 10
+
+        # Same function, same input - cache hit
+        result2 = sync_test_activity(5)
+        assert result2 == 10
+
+    def test_sync_cache_complex_return_types(self, cache_backend_configured):
+        """Test sync caching with complex return types."""
+        call_count = 0
+
+        @cached_activity(policy=CachePolicy.INPUTS)
+        def sync_test_activity(user_id: int) -> dict:
+            nonlocal call_count
+            call_count += 1
+            return {
+                "user": {"id": user_id, "name": "Test"},
+                "items": [1, 2, 3],
+                "metadata": {"active": True, "score": 95.5},
+            }
+
+        result1 = sync_test_activity(123)
+        result2 = sync_test_activity(123)
+
+        assert result1 == result2
+        assert call_count == 1
+
+    def test_sync_non_serializable_input_fallback(self, cache_backend_configured):
+        """Test that sync activities with non-serializable inputs fall back to execution."""
+        call_count = 0
+
+        class NonSerializable:
+            pass
+
+        @cached_activity(policy=CachePolicy.INPUTS)
+        def sync_test_activity(obj: object) -> str:
+            nonlocal call_count
+            call_count += 1
+            return "executed"
+
+        # Should execute despite non-serializable input
+        result = sync_test_activity(NonSerializable())
+        assert result == "executed"
+        assert call_count == 1
+
+
+@pytest.mark.unit
 class TestSetAndGetCacheBackend:
     """Test cache backend management functions."""
 
