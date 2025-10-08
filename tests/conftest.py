@@ -10,7 +10,7 @@ from temporal_activity_cache.backends.redis import RedisCacheBackend
 
 @pytest_asyncio.fixture(scope="function")
 async def fake_redis():
-    """Provide a fake Redis client for testing.
+    """Provide a fake async Redis client for testing.
 
     Uses fakeredis to simulate Redis without requiring a real server.
     Each test gets a fresh instance to ensure proper isolation.
@@ -22,8 +22,24 @@ async def fake_redis():
     await client.aclose()
 
 
+@pytest.fixture(scope="function")
+def fake_redis_sync():
+    """Provide a fake sync Redis client for testing.
+
+    Uses fakeredis to simulate Redis without requiring a real server.
+    Each test gets a fresh instance to ensure proper isolation.
+    """
+    from fakeredis import FakeRedis
+
+    client = FakeRedis(decode_responses=False)
+    yield client
+    # Ensure all data is flushed between tests for proper isolation
+    client.flushdb()
+    client.close()
+
+
 @pytest_asyncio.fixture(scope="function")
-async def redis_backend(fake_redis):
+async def redis_backend(fake_redis, fake_redis_sync):
     """Provide a Redis cache backend using FakeRedis.
 
     This fixture creates a RedisCacheBackend instance connected to FakeRedis.
@@ -35,8 +51,9 @@ async def redis_backend(fake_redis):
         host="localhost",  # Won't be used with fake redis
         port=6379,
     )
-    # Replace the client with our fake one
+    # Replace the clients with our fake ones
     backend._client = fake_redis
+    backend._sync_client = fake_redis_sync
 
     yield backend
 

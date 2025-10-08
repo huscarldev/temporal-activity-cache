@@ -452,6 +452,74 @@ class TestSyncActivityCaching:
 
 
 @pytest.mark.unit
+class TestSyncActivityThreadPool:
+    """Test sync activities running in thread pools (Temporal's default behavior)."""
+
+    def test_sync_activity_in_thread_pool(self, cache_backend_configured):
+        """Test that sync activities work correctly when executed in thread pool.
+
+        This simulates how Temporal executes sync activities in a ThreadPoolExecutor.
+        """
+        import concurrent.futures
+
+        call_count = 0
+
+        @cached_activity(policy=CachePolicy.INPUTS, ttl=timedelta(hours=1))
+        def sync_test_activity(user_id: int) -> dict:
+            nonlocal call_count
+            call_count += 1
+            return {"user_id": user_id, "name": f"User {user_id}"}
+
+        # Execute in thread pool like Temporal does
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            # First call - cache miss
+            future1 = executor.submit(sync_test_activity, 123)
+            result1 = future1.result()
+            assert result1 == {"user_id": 123, "name": "User 123"}
+            assert call_count == 1
+
+            # Second call - cache hit
+            future2 = executor.submit(sync_test_activity, 123)
+            result2 = future2.result()
+            assert result2 == {"user_id": 123, "name": "User 123"}
+            assert call_count == 1  # Should still be 1 (cache hit)
+
+    def test_sync_activity_concurrent_thread_pool(self, cache_backend_configured):
+        """Test concurrent sync activities in thread pool with different inputs.
+
+        With distributed locking enabled (default), duplicate concurrent executions
+        should only execute once.
+        """
+        import concurrent.futures
+
+        call_count = 0
+
+        @cached_activity(policy=CachePolicy.INPUTS)
+        def process_user(user_id: int) -> int:
+            nonlocal call_count
+            call_count += 1
+            import time
+            time.sleep(0.01)  # Simulate work
+            return user_id * 2
+
+        # Execute multiple tasks concurrently in thread pool
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [
+                executor.submit(process_user, 1),
+                executor.submit(process_user, 2),
+                executor.submit(process_user, 1),  # Duplicate (locking prevents double exec)
+                executor.submit(process_user, 3),
+            ]
+
+            results = [f.result() for f in futures]
+
+        # Results should be correct
+        assert results == [2, 4, 2, 6]
+        # With distributed locking, duplicate should not execute twice
+        assert call_count == 3
+
+
+@pytest.mark.unit
 class TestSetAndGetCacheBackend:
     """Test cache backend management functions."""
 

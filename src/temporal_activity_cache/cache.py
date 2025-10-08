@@ -58,11 +58,18 @@ def cached_activity(
     policy: CachePolicy = CachePolicy.INPUTS,
     ttl: Optional[timedelta] = None,
     cache_backend: Optional[CacheBackend] = None,
+    enable_locking: bool = True,
+    lock_timeout: timedelta = timedelta(seconds=30),
+    lock_acquire_timeout: timedelta = timedelta(seconds=60),
 ) -> Callable[[Callable[..., T]], Callable[..., T]]:
     """Decorator to add Prefect-style caching to Temporal activities.
 
     This decorator wraps a Temporal activity function to add caching capabilities.
     Cache keys are computed based on the cache policy and function inputs.
+
+    Uses distributed locking to prevent duplicate execution when concurrent activities
+    have identical inputs. When locking is enabled, if multiple activities start with
+    the same inputs, only one executes while others wait for the result.
 
     IMPORTANT: This decorator should be applied BEFORE the @activity.defn decorator:
 
@@ -79,6 +86,9 @@ def cached_activity(
         policy: Cache policy for key generation (default: INPUTS)
         ttl: Time-to-live for cached results (None = no expiration)
         cache_backend: Specific cache backend to use (default: global backend)
+        enable_locking: Enable distributed locking to prevent duplicate execution (default: True)
+        lock_timeout: TTL for locks to auto-expire (default: 30s)
+        lock_acquire_timeout: Max time to wait to acquire a lock (default: 60s)
 
     Returns:
         Decorated function with caching capability
@@ -107,7 +117,7 @@ def cached_activity(
                 else:
                     return func(*args, **kwargs)
 
-            # Check cache
+            # Check cache first (before acquiring lock)
             cached_result = await backend.get(cache_key)
             if cached_result is not None:
                 # Log cache hit
@@ -123,31 +133,71 @@ def cached_activity(
 
                 return deserialize_result(cached_result)
 
-            # Cache miss - execute function
+            # Cache miss - acquire lock if enabled
+            lock_acquired = False
+            if enable_locking:
+                try:
+                    lock_acquired = await backend.acquire_lock(
+                        cache_key, lock_acquire_timeout, lock_timeout
+                    )
+                except Exception as e:
+                    logger.warning(f"Lock acquisition failed: {e}. Proceeding without lock.")
+                    lock_acquired = False
+
+                if not lock_acquired:
+                    # Failed to acquire lock - another execution is in progress
+                    # Check cache again as the other execution might have completed
+                    cached_result = await backend.get(cache_key)
+                    if cached_result is not None:
+                        logger.info(f"Cache HIT after lock timeout: {cache_key}")
+                        return deserialize_result(cached_result)
+
+                    # Still no cache - execute anyway (lock timeout might mean stale lock)
+                    logger.warning(
+                        f"Lock acquisition timeout for {cache_key}. Executing anyway."
+                    )
+
             try:
-                info = activity.info()
-                logger.info(
-                    f"Cache MISS for activity {info.activity_type} "
-                    f"in workflow {info.workflow_id}: {cache_key}"
-                )
-            except RuntimeError:
-                # Not in activity context
-                logger.info(f"Cache MISS: {cache_key}")
+                # Double-check cache after acquiring lock
+                if lock_acquired:
+                    cached_result = await backend.get(cache_key)
+                    if cached_result is not None:
+                        logger.info(f"Cache HIT after acquiring lock: {cache_key}")
+                        return deserialize_result(cached_result)
 
-            # Execute activity
-            if asyncio.iscoroutinefunction(func):
-                result = await func(*args, **kwargs)
-            else:
-                result = func(*args, **kwargs)
+                # Cache miss - execute function
+                try:
+                    info = activity.info()
+                    logger.info(
+                        f"Cache MISS for activity {info.activity_type} "
+                        f"in workflow {info.workflow_id}: {cache_key}"
+                    )
+                except RuntimeError:
+                    # Not in activity context
+                    logger.info(f"Cache MISS: {cache_key}")
 
-            # Store in cache
-            try:
-                serialized = serialize_result(result)
-                await backend.set(cache_key, serialized, ttl)
-            except Exception as e:
-                logger.warning(f"Failed to cache result for {cache_key}: {e}")
+                # Execute activity
+                if asyncio.iscoroutinefunction(func):
+                    result = await func(*args, **kwargs)
+                else:
+                    result = func(*args, **kwargs)
 
-            return result
+                # Store in cache
+                try:
+                    serialized = serialize_result(result)
+                    await backend.set(cache_key, serialized, ttl)
+                except Exception as e:
+                    logger.warning(f"Failed to cache result for {cache_key}: {e}")
+
+                return result
+
+            finally:
+                # Always release lock if we acquired it
+                if lock_acquired:
+                    try:
+                        await backend.release_lock(cache_key)
+                    except Exception as e:
+                        logger.warning(f"Failed to release lock for {cache_key}: {e}")
 
         @functools.wraps(func)
         def sync_wrapper(*args: Any, **kwargs: Any) -> T:
@@ -162,25 +212,9 @@ def cached_activity(
                 logger.warning(f"Failed to compute cache key: {e}. Executing without cache.")
                 return func(*args, **kwargs)
 
-            # Helper to run async operations in event loop
-            def run_async(coro):
-                try:
-                    # Try to get the running event loop
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        # We're in a thread pool - use run_coroutine_threadsafe
-                        future = asyncio.run_coroutine_threadsafe(coro, loop)
-                        return future.result()
-                    else:
-                        # No running loop - run synchronously
-                        return loop.run_until_complete(coro)
-                except RuntimeError:
-                    # No event loop exists - create a new one
-                    return asyncio.run(coro)
-
-            # Check cache
+            # Check cache first (before acquiring lock)
             try:
-                cached_result = run_async(backend.get(cache_key))
+                cached_result = backend.get_sync(cache_key)
                 if cached_result is not None:
                     # Log cache hit
                     try:
@@ -197,28 +231,74 @@ def cached_activity(
             except Exception as e:
                 logger.warning(f"Cache read failed: {e}. Executing without cache.")
 
-            # Cache miss - execute function
+            # Cache miss - acquire lock if enabled
+            lock_acquired = False
+            if enable_locking:
+                try:
+                    lock_acquired = backend.acquire_lock_sync(
+                        cache_key, lock_acquire_timeout, lock_timeout
+                    )
+                except Exception as e:
+                    logger.warning(f"Lock acquisition failed: {e}. Proceeding without lock.")
+                    lock_acquired = False
+
+                if not lock_acquired:
+                    # Failed to acquire lock - another execution is in progress
+                    # Check cache again as the other execution might have completed
+                    try:
+                        cached_result = backend.get_sync(cache_key)
+                        if cached_result is not None:
+                            logger.info(f"Cache HIT after lock timeout: {cache_key}")
+                            return deserialize_result(cached_result)
+                    except Exception as e:
+                        logger.warning(f"Cache read after lock timeout failed: {e}")
+
+                    # Still no cache - execute anyway (lock timeout might mean stale lock)
+                    logger.warning(
+                        f"Lock acquisition timeout for {cache_key}. Executing anyway."
+                    )
+
             try:
-                info = activity.info()
-                logger.info(
-                    f"Cache MISS for activity {info.activity_type} "
-                    f"in workflow {info.workflow_id}: {cache_key}"
-                )
-            except RuntimeError:
-                # Not in activity context
-                logger.info(f"Cache MISS: {cache_key}")
+                # Double-check cache after acquiring lock
+                if lock_acquired:
+                    try:
+                        cached_result = backend.get_sync(cache_key)
+                        if cached_result is not None:
+                            logger.info(f"Cache HIT after acquiring lock: {cache_key}")
+                            return deserialize_result(cached_result)
+                    except Exception as e:
+                        logger.warning(f"Cache read after acquiring lock failed: {e}")
 
-            # Execute activity
-            result = func(*args, **kwargs)
+                # Cache miss - execute function
+                try:
+                    info = activity.info()
+                    logger.info(
+                        f"Cache MISS for activity {info.activity_type} "
+                        f"in workflow {info.workflow_id}: {cache_key}"
+                    )
+                except RuntimeError:
+                    # Not in activity context
+                    logger.info(f"Cache MISS: {cache_key}")
 
-            # Store in cache
-            try:
-                serialized = serialize_result(result)
-                run_async(backend.set(cache_key, serialized, ttl))
-            except Exception as e:
-                logger.warning(f"Failed to cache result for {cache_key}: {e}")
+                # Execute activity
+                result = func(*args, **kwargs)
 
-            return result
+                # Store in cache
+                try:
+                    serialized = serialize_result(result)
+                    backend.set_sync(cache_key, serialized, ttl)
+                except Exception as e:
+                    logger.warning(f"Failed to cache result for {cache_key}: {e}")
+
+                return result
+
+            finally:
+                # Always release lock if we acquired it
+                if lock_acquired:
+                    try:
+                        backend.release_lock_sync(cache_key)
+                    except Exception as e:
+                        logger.warning(f"Failed to release lock for {cache_key}: {e}")
 
         # Return appropriate wrapper based on whether function is async
         if asyncio.iscoroutinefunction(func):

@@ -13,6 +13,7 @@ Prefect-style activity caching for Temporal workflows using Redis.
 
 - 🚀 **Cross-workflow caching** - Reuse activity results across different workflow executions
 - 🔄 **Distributed workers** - Cache shared via Redis across multiple worker instances
+- 🔒 **Distributed locking** - Prevents duplicate execution when concurrent activities have identical inputs
 - ⚡ **Multiple cache policies** - Cache by inputs, source code, or disable caching
 - ⏱️ **Configurable TTL** - Set expiration times for cached results
 - 🛡️ **Graceful degradation** - Activities still work if Redis is unavailable
@@ -186,6 +187,56 @@ def fetch_data_sync(user_id: int) -> dict:
 ```
 
 **Note:** When using sync activities with caching, the cache backend operations (get/set) are automatically bridged to work with the async cache backend from the sync context.
+
+## Distributed Locking
+
+By default, `temporal-activity-cache` uses distributed locking to prevent duplicate execution when multiple activities start concurrently with identical inputs. This solves the "thundering herd" problem where multiple workers execute the same expensive operation simultaneously.
+
+### How It Works
+
+1. **First execution** acquires a lock and executes the activity
+2. **Concurrent executions** with same inputs wait for the lock
+3. **After completion**, waiting executions find the cached result instead of re-executing
+
+```python
+from datetime import timedelta
+from temporalio import activity
+from temporal_activity_cache import cached_activity, CachePolicy
+
+@cached_activity(
+    policy=CachePolicy.INPUTS,
+    enable_locking=True,  # Default: True
+    lock_timeout=timedelta(seconds=30),  # Lock auto-expires after 30s
+    lock_acquire_timeout=timedelta(seconds=60),  # Wait up to 60s for lock
+)
+@activity.defn
+async def expensive_operation(data_id: int) -> dict:
+    # This will only execute once even if called concurrently
+    result = await perform_expensive_computation(data_id)
+    return result
+```
+
+### Configuration Options
+
+- **`enable_locking`** (bool, default=`True`): Enable/disable distributed locking
+- **`lock_timeout`** (timedelta, default=30s): How long before lock auto-expires (TTL)
+- **`lock_acquire_timeout`** (timedelta, default=60s): Max time to wait to acquire a lock
+
+### Disabling Locking
+
+You can disable locking if you want the old behavior or have specific requirements:
+
+```python
+@cached_activity(
+    policy=CachePolicy.INPUTS,
+    enable_locking=False,  # Disable locking
+)
+@activity.defn
+async def my_activity(x: int) -> int:
+    return x * 2
+```
+
+**Warning:** Without locking, concurrent activities with identical inputs may execute redundantly, and the last one to complete will overwrite the cache.
 
 ## Advanced Usage
 
@@ -443,6 +494,18 @@ logger = logging.getLogger("temporal_activity_cache")
 - Activity results must be JSON serializable
 - Cache invalidation is manual (no automatic invalidation on data changes)
 
+## Roadmap
+
+### Implemented Features
+
+- ✅ **Distributed Locking**: Redis-based distributed locks prevent duplicate execution when concurrent activities have identical inputs. When one execution is in progress, subsequent executions with the same inputs wait for the result instead of executing redundantly. This solves the race condition where multiple concurrent executions would waste resources.
+
+### Planned Features
+
+- **Additional cache backends**: Support for Memcached, DynamoDB, and other storage backends
+- **Cache warming**: Pre-populate cache with known values
+- **Advanced invalidation patterns**: Pattern-based and bulk cache invalidation
+
 ## Testing
 
 The library includes comprehensive tests using pytest, fakeredis, and Temporal's WorkflowEnvironment:
@@ -480,12 +543,21 @@ MIT License - see LICENSE file for details
 
 ## Changelog
 
+### 0.3.0 (2025-10-08)
+
+- **Distributed Locking**: Added Redis-based distributed locking to prevent duplicate execution of concurrent activities with identical inputs
+- Lock configuration options: `enable_locking`, `lock_timeout`, `lock_acquire_timeout`
+- Automatic lock release with try/finally pattern
+- Exponential backoff for lock acquisition
+- Comprehensive test suite for locking scenarios
+- Updated documentation with locking examples and best practices
+
 ### 0.1.0 (2025-01-04)
 
 - Initial release
 - Redis cache backend
 - Support for INPUTS and TASK_SOURCE cache policies
 - Configurable TTL
-- Async activity support
+- Async and sync activity support
 - Comprehensive test suite with pytest, fakeredis, and Temporal testing
 - Complete example and documentation
